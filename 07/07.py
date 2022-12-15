@@ -1,5 +1,10 @@
 import os
+import functools
+from abc import ABC, abstractmethod
+from typing import Callable
 
+
+# CORE INTERPRETER STUFF
 COMMANDS = {}
 
 
@@ -11,8 +16,106 @@ def register_cmd(cmd_name):
     return wrapper
 
 
+class Command(ABC):
+    def check(self, args):
+        return True
+    
+    def run(self, args, interpreter=None):
+        pass
+
+    def receive_output(self, output_data: str):
+        pass
+
+    def parse_output(self):
+        pass
+    
+    def clear_output(self):
+        self.output = ""
+
+
+class PromptInterpreter:
+    def __init__(self):
+        self.current_cmd = None
+        self.cmd_processors = {}
+        self.cwd = []
+
+    def process_cmd(self, prompt: str):
+        words = prompt.split(" ")
+        cmd_name, args = words[0].strip(), list(map(str.strip, words[1:]))
+    
+        cmd_class = COMMANDS.get(cmd_name, None)
+        if not cmd_class:
+            raise Exception(f"Error: Command {cmd_name} not found!")
+        
+        cmd_obj = cmd_class()
+        self.current_cmd = cmd_obj
+        
+        if not cmd_obj.check(args):
+            raise Exception(f"Error while parsing command {type(cmd_obj).__name__}")
+        
+        cmd_obj.run(args, interpreter=self)
+    
+    def receive_output(self, output_data: str):
+        if self.current_cmd:
+            self.current_cmd.receive_output(output_data)
+
+    def register_cmd_output_processor(self, cmd: Command, func: Callable, *args, **kwargs):
+        if cmd not in self.cmd_processors:
+            self.cmd_processors[cmd] = []
+        self.cmd_processors[cmd].append((func, args, kwargs))
+
+    def on_cmd_end(self):
+        if not self.current_cmd:
+            raise Exception("Error: No command running!")
+        
+        cmd = self.current_cmd
+        parsed_data = cmd.parse_output()
+        cmd.clear_output()
+        self.current_cmd = None
+        processors = self.cmd_processors.get(type(cmd), [])
+        for p in processors:
+            func, args, kwargs = p
+            func(parsed_data, interpreter, *args, **kwargs) 
+
+
+# TREE NAVIGATION HELPERS
+def find(tree_node: dict, predicate: Callable, cwd: list = None):
+    results = []
+
+    if cwd is None:
+        cwd = []
+
+    for fs_obj in tree_node:
+        if predicate(tree_node[fs_obj], cwd + [fs_obj]):
+            results.append(cwd + [fs_obj])
+
+        if type(tree_node[fs_obj]) == dict:
+            results.extend(find(tree_node[fs_obj], predicate, cwd + [fs_obj]))
+    
+    return results
+
+
+def get_file(tree_node: dict, path: list):
+    curr_node = tree_node
+
+    for d in path:
+        curr_node = curr_node[d]
+    
+    return curr_node
+
+
+def get_files_in_folder(tree_node: dict, path: list):
+    return find(tree_node, lambda f, cwd: path == cwd[:len(path)] and type(f) is not dict)
+
+
+def get_folder_size(tree_node: dict, path: list):
+    return sum(list(map(lambda p: int(get_file(tree_node, p)), get_files_in_folder(tree_node, path))))
+
+
+
+# COMMANDS
 @register_cmd('cd')
-class ChangeDirectoryCommand:
+class ChangeDirectoryCommand(Command):
     output = ""
 
     def check(self, args):
@@ -28,25 +131,10 @@ class ChangeDirectoryCommand:
         else:
             interpreter.cwd.append(fs_obj)
 
-    def receive_output(self, output_data: str):
-        pass
-
-    def parse_output(self):
-        pass
-    
-    def clear_output(self):
-        self.output = ""
-
 
 @register_cmd('ls')
-class ListDirectoryCommand:
+class ListDirectoryCommand(Command):
     output = ""
-
-    def check(self, args):
-        return True
-        
-    def run(self, args, interpreter=None):
-        pass
 
     def receive_output(self, output_data: str):
         self.output += output_data
@@ -63,149 +151,74 @@ class ListDirectoryCommand:
         
         return parsed_data
     
-    def clear_output(self):
-        self.output = ""
 
 
-class PromptInterpreter:
-    def __init__(self):
-        self.current_cmd = None
-        self.cwd = []
 
-    def process_cmd(self, prompt: str):
-        words = prompt.split(" ")
-        print(f"{words=}")
-        cmd_name, args = words[0].strip(), list(map(str.strip, words[1:]))
-    
-        cmd_class = COMMANDS.get(cmd_name, None)
-        
-        if not cmd_class:
-            raise Exception(f"Error: Command {cmd_name} not found!")
-        
-        cmd_obj = cmd_class()
-        self.current_cmd = cmd_obj
-        
-        if not cmd_obj.check(args):
-            raise Exception(f"Error while parsing command {type(cmd_obj).__name__}")
-        
-        cmd_obj.run(args, interpreter=self)
-    
-    def receive_output(self, output_data: str):
-        if self.current_cmd:
-            self.current_cmd.receive_output(output_data)
+if __name__ == "__main__":
+    TREE = {"/": {}}
 
-    def on_cmd_end(self):
-        if self.current_cmd:
-            cmd = self.current_cmd
-            parsed_data = cmd.parse_output()
-            cmd.clear_output()
-            self.current_cmd = None
-            return cmd, parsed_data
+    with open(os.path.dirname(__file__) + "/input.txt") as fp:
+        data = fp.readlines()
 
+    interpreter = PromptInterpreter()
 
-def update_tree_using_cmd_output(tree, interpreter, output_data):
-    filelist = output_data
+    def update_tree_with_ls_cmd_output(output_data, interpreter, tree):
+        filelist = output_data
+        curr_tree_node = tree
 
-    curr_tree_node = tree
-
-    for d in interpreter.cwd:
-        if d in curr_tree_node and type(curr_tree_node[d]) is not dict:
-            raise Exception(f"Trying to walk into {d} which is not a directory!")
-        
-        if d not in curr_tree_node:
-            curr_tree_node[d] = {}
-        
-        curr_tree_node = curr_tree_node[d]
-
-    for filename in filelist:
-        if filelist[filename] == "dir":
-            curr_tree_node[filename] = {}
-        else:
-            curr_tree_node[filename] = filelist[filename]
-
-
-def get_size_directory(tree, predicat=None):
-    size = 0
-
-    for fs_obj in tree:
-        if type(tree[fs_obj]) == dict:
-            size += get_size_directory(tree[fs_obj])
-        else:
-            size += int(tree[fs_obj])
-    
-
-    return size
-
-
-def find_directory_with_max_size(tree, size_max, cwd=None):
-    if cwd == None:
-        cwd = []
-
-    found_dirs = []
-
-    for fs_obj in tree:
-        cwd.append(fs_obj)
-        if type(tree[fs_obj]) == dict:
-            dir_size = get_size_directory(tree[fs_obj])
-
-            if dir_size <= size_max:
-                found_dirs.append((list(cwd), dir_size))
+        for d in interpreter.cwd:
+            if d in curr_tree_node and type(curr_tree_node[d]) is not dict:
+                raise Exception(f"Trying to walk into {d} which is not a directory!")
             
-            found_dirs.extend(find_directory_with_max_size(tree[fs_obj], size_max, cwd))
-
-    return found_dirs
-
-
-TREE = {"/": {}}
-
-with open(os.path.dirname(__file__) + "/input.txt") as fp:
-    data = fp.readlines()
-
-interpreter = PromptInterpreter()
-
-for i, l in enumerate(data):
-    output = ""
-
-    if l.startswith("$"):
-        last_cmd = interpreter.current_cmd
-
-        if last_cmd:
-            cmd, cmd_output = interpreter.on_cmd_end()
+            if d not in curr_tree_node:
+                curr_tree_node[d] = {}
             
-            if type(cmd) is ListDirectoryCommand:
-                update_tree_using_cmd_output(TREE, interpreter, cmd_output)
+            curr_tree_node = curr_tree_node[d]
+
+        for filename in filelist:
+            if filelist[filename] == "dir":
+                curr_tree_node[filename] = {}
+            else:
+                curr_tree_node[filename] = filelist[filename]
+
+    interpreter.register_cmd_output_processor(ListDirectoryCommand, update_tree_with_ls_cmd_output, TREE)
+
+    # PART 0
+    DRIVE_SIZE = 70000000
+    UPDATE_SIZE = 30000000
+
+    # Reading replay log and feeding commands to interpreter
+    for i, l in enumerate(data):
+        output = ""
+
+        if l.startswith("$"):
+            if interpreter.current_cmd:
+                interpreter.on_cmd_end()
                 
-        interpreter.process_cmd(l[1:].strip())
-    else:
-        interpreter.receive_output(l)
+            interpreter.process_cmd(l[1:].strip())
+        else:
+            interpreter.receive_output(l)
 
+    interpreter.on_cmd_end()
 
-cmd, cmd_output = interpreter.on_cmd_end()
-if type(cmd) is ListDirectoryCommand:
-    update_tree_using_cmd_output(TREE, interpreter, cmd_output)
+    folder_list = find(TREE, lambda fs_obj, cwd: type(fs_obj) is dict)
+    #print(f"{folder_list=}")
 
-global_size = get_size_directory(TREE)
-small_dirs_size = find_directory_with_max_size(TREE, 100000)
+    # PART 1
+    directories_with_max_size = list(filter(lambda p: get_folder_size(TREE, p) < 100000, folder_list))
+    total_small_dirs_size = sum(map(lambda d: get_folder_size(TREE, d), directories_with_max_size))
+    print(f"{total_small_dirs_size=}")
 
-total_small_dirs_size = sum(map(lambda d: d[1], small_dirs_size))
+    # PART 2
+    total_size = get_folder_size(TREE, ['/'])
+    print(f"{total_size=}")
 
-print(f"{total_small_dirs_size=}")
+    space_to_restore = UPDATE_SIZE - (DRIVE_SIZE - total_size)
+    print(f"{space_to_restore=}")
 
+    directories_with_max_size = list(filter(lambda p: get_folder_size(TREE, p) >= space_to_restore, folder_list))
+    print(f"{directories_with_max_size=}")
 
-def get_all_folders(tree):
-    if cwd == None:
-        cwd = []
-
-    found_dirs = []
-
-    for fs_obj in tree:
-        cwd.append(fs_obj)
-        if type(tree[fs_obj]) == dict:
-            dir_size = get_size_directory(tree[fs_obj])
-
-            if dir_size <= size_max:
-                found_dirs.append((list(cwd), dir_size))
-            
-            found_dirs.extend(find_directory_with_max_size(tree[fs_obj], size_max, cwd))
-
-    return found_dirs
+    smallest_big_folder_path = list(sorted(directories_with_max_size, key=lambda p: get_folder_size(TREE, p)))[0]
+    smallest_big_folder_size = get_folder_size(TREE, smallest_big_folder_path)
+    print(f"{smallest_big_folder_size=} ({smallest_big_folder_path})")
